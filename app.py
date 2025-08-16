@@ -88,7 +88,8 @@ class TinyRAG:
         self.vectors = self.tfidf.fit_transform(self.docs)
 
     def retrieve(self, query: str, top_k: int = 3) -> List[str]:
-        if not self.vectors or not self.docs:
+        # FIX: sparse matrix cannot be used in boolean context
+        if self.vectors is None or not self.docs:
             return []
         qv = self.tfidf.transform([query])
         sims = cosine_similarity(qv, self.vectors)[0]
