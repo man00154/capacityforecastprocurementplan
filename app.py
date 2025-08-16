@@ -21,14 +21,13 @@ API_URL = f"https://generativelanguage.googleapis.com/v1beta/models/{MODEL_NAME}
 
 st.set_page_config(page_title="TinyDCPlanner — capacity forecast + procurement", layout="wide")
 
-st.title("TinyDCPlanner — Forecast capacity & generate procurement plans")
+st.title("MANISH - DCPlanner — Forecast capacity & generate procurement plans")
 st.markdown(
     """
-Very lightweight pipeline:
+pipeline:
 - small lag-based ML forecast (RandomForest)
 - tiny RAG (TF-IDF top-k retrieval)
-- simple agentic orchestration that calls Google Generative API (Gemini) if `GEMINI_API_KEY` is set,
-  otherwise returns a safe local template.
+- simple agentic 
 """
 )
 
@@ -44,9 +43,6 @@ def ensure_datetime(df: pd.DataFrame, date_col: str) -> pd.DataFrame:
     return df
 
 def create_lag_features(series: pd.Series, lags: int = 7) -> pd.DataFrame:
-    """
-    Create lag features for a univariate series.
-    """
     df = pd.DataFrame({ "y": series.values })
     for lag in range(1, lags+1):
         df[f"lag_{lag}"] = df["y"].shift(lag)
@@ -54,9 +50,6 @@ def create_lag_features(series: pd.Series, lags: int = 7) -> pd.DataFrame:
     return df
 
 def train_forecaster(y: pd.Series, lags: int = 7) -> Dict[str, Any]:
-    """
-    Train a small RandomForest on lag features. Return model, scaler and last known window.
-    """
     df_lag = create_lag_features(y, lags=lags)
     X = df_lag.drop(columns=["y"]).values
     y_tr = df_lag["y"].values
@@ -66,14 +59,13 @@ def train_forecaster(y: pd.Series, lags: int = 7) -> Dict[str, Any]:
     X_val_s = scaler.transform(X_val)
     model = RandomForestRegressor(n_estimators=100, random_state=42)
     model.fit(X_train_s, y_train)
-    # store last window for iterative forecasting
     last_window = y[-lags:].tolist()
     return {"model": model, "scaler": scaler, "last_window": last_window, "lags": lags}
 
 def forecast_iterative(forecaster: Dict[str, Any], steps: int = 7) -> List[float]:
     model = forecaster["model"]
     scaler = forecaster["scaler"]
-    last = forecaster["last_window"][:]  # copy
+    last = forecaster["last_window"][:]
     lags = forecaster["lags"]
     preds = []
     for _ in range(steps):
@@ -110,12 +102,10 @@ class TinyRAG:
 
 def forecast_tool(df: pd.DataFrame, date_col: str, value_col: str, periods: int) -> Dict[str, Any]:
     y = df[value_col].astype(float).reset_index(drop=True)
-    lags = min(14, max(3, int(len(y) * 0.1)))  # small heuristic for lags
+    lags = min(14, max(3, int(len(y) * 0.1)))
     forecaster = train_forecaster(y, lags=lags)
     preds = forecast_iterative(forecaster, steps=periods)
     last_date = pd.to_datetime(df[date_col].iloc[-1])
-    freq = (pd.to_datetime(df[date_col].iloc[-1]) - pd.to_datetime(df[date_col].iloc[-2])) if len(df) >= 2 else timedelta(days=1)
-    # create future dates using same delta as last two rows (fallback to daily)
     try:
         delta = pd.to_datetime(df[date_col].iloc[-1]) - pd.to_datetime(df[date_col].iloc[-2])
     except Exception:
@@ -129,57 +119,35 @@ def retrieve_tool(rag: TinyRAG, query: str, top_k: int = 3) -> Dict[str, Any]:
     return {"snippets": snippets}
 
 def generate_with_gemini(prompt: str) -> str:
-    """
-    Call the Gemini endpoint if GEMINI_API_KEY is set; otherwise return a local fallback.
-    NOTE: The public Google Generative API schema may differ; this is a minimal example payload.
-    If integration fails, the function will return a fallback textual plan.
-    """
-    key = os.environ.get("GEMINI_API_KEY") or st.secrets.get("GEMINI_API_KEY", None) if "GEMINI_API_KEY" in st.secrets else os.environ.get("GEMINI_API_KEY")
+    key = os.environ.get("GEMINI_API_KEY") or st.secrets.get("GEMINI_API_KEY", None)
     if not key:
-        # fallback (offline) generation: keep safe, deterministic
         return local_plan_generator(prompt)
-
     headers = {
         "Content-Type": "application/json",
         "Authorization": f"Bearer {key}"
     }
-    # Minimal request body — user can adapt to exact API spec if needed.
-    body = {
-        "prompt": {
-            "text": prompt
-        },
-        "temperature": 0.2,
-        "maxOutputTokens": 800
-    }
+    body = {"prompt": {"text": prompt}, "temperature":0.2, "maxOutputTokens":800}
     try:
         r = requests.post(API_URL, headers=headers, json=body, timeout=20)
         r.raise_for_status()
         resp = r.json()
-        # The exact structure may vary. Try common fields, otherwise fallback to whole JSON.
-        # Many Google gen endpoints return 'candidates' or 'output' fields; try to be robust.
         if isinstance(resp, dict):
-            # Try a few reasonable keys
             if "candidates" in resp and isinstance(resp["candidates"], list) and len(resp["candidates"])>0:
                 text = resp["candidates"][0].get("content", "") or resp["candidates"][0].get("display", "")
                 if text:
                     return text
             if "output" in resp and isinstance(resp["output"], list):
-                # join text pieces
                 return " ".join([str(x.get("content","")) if isinstance(x, dict) else str(x) for x in resp["output"]])
-            # some versions: 'text' or 'content' top-level
             if "text" in resp:
                 return resp["text"]
             if "content" in resp:
                 return resp["content"]
-        # fallback to JSON dump
         return json.dumps(resp, indent=2)[:4000]
     except Exception as e:
         st.warning(f"Calling Gemini failed: {e}. Using local fallback.")
         return local_plan_generator(prompt)
 
 def local_plan_generator(prompt: str) -> str:
-    # Extremely lightweight template-based fallback: extracts numbers and produces action items.
-    # This is intentionally simple and safe.
     import re
     nums = re.findall(r"\d+\.?\d*", prompt)
     top_nums = nums[:6]
@@ -197,17 +165,15 @@ def local_plan_generator(prompt: str) -> str:
     return summary
 
 def generate_plan_tool(forecast_df: pd.DataFrame, snippets: List[str], organization_notes: str = "") -> str:
-    # Build a prompt that includes forecast and retrieved context.
     prompt_parts = []
     prompt_parts.append("You are an expert data-center capacity planner. Produce a short, prioritized procurement plan.")
     prompt_parts.append("Forecast (date, predicted_capacity):")
-    # include top 10 forecast rows in prompt (text)
     fc_text = "\n".join([f"{row['date'].strftime('%Y-%m-%d')}: {row['predicted_capacity']:.2f}" for _, row in forecast_df.reset_index().iterrows()])
     prompt_parts.append(fc_text)
     if snippets:
         prompt_parts.append("\nRelevant documents / context snippets:")
         for s in snippets:
-            prompt_parts.append(f"- {s[:800]}")  # short snippet
+            prompt_parts.append(f"- {s[:800]}")
     if organization_notes:
         prompt_parts.append("\nOrganization notes:")
         prompt_parts.append(organization_notes[:1000])
@@ -235,7 +201,6 @@ with st.sidebar:
 
 # sample data
 if sample_btn and not uploaded:
-    # create small synthetic sample: daily dates and sinusoidal capacity + trend
     idx = pd.date_range(end=pd.Timestamp.today(), periods=180, freq="D")
     vals = 1000 + (np.sin(np.arange(len(idx))/10) * 150) + np.linspace(0, 200, len(idx)) + np.random.normal(0, 30, len(idx))
     df = pd.DataFrame({"date": idx, "capacity": vals})
@@ -250,7 +215,6 @@ else:
     st.info("Upload a CSV or click 'Use sample data' to start.")
     st.stop()
 
-# validate
 try:
     df = ensure_datetime(df, date_col)
 except Exception as e:
@@ -267,6 +231,8 @@ st.dataframe(df.tail(10))
 # Build RAG index
 rag = TinyRAG()
 texts = []
+
+# process uploaded files
 if uploaded_texts:
     for f in uploaded_texts:
         try:
@@ -278,29 +244,28 @@ if uploaded_texts:
                 txt = ""
         if txt:
             texts.append(txt)
+
+# process pasted context
 if paste_context:
-    # split by lines
     for line in paste_context.splitlines():
         if line.strip():
             texts.append(line.strip())
 
-if texts:
-    rag.index_texts(texts)
-    st.success(f"Indexed {len(texts)} knowledge snippets for RAG retrieval.")
-else:
-    st.info("No knowledge snippets uploaded; RAG will be empty.")
+# --- FIX: add default snippet if none provided ---
+if not texts:
+    texts.append("Default knowledge snippet: Always check previous capacity trends and vendor lead times.")
 
-# Run agentic pipeline (no external orchestration - very simple)
+rag.index_texts(texts)
+st.success(f"Indexed {len(texts)} knowledge snippets for RAG retrieval.")
+
+# Run agentic pipeline
 st.header("Run pipeline")
 if st.button("Run forecast + generate procurement plan"):
     with st.spinner("Running small forecast and generating plan..."):
-        # 1) Forecast
         tool_res = forecast_tool(df, date_col, value_col, periods=int(periods))
         forecast_df = tool_res["forecast_df"]
         st.subheader("Forecast")
         st.dataframe(forecast_df)
-        # 2) Retrieval
-        # Construct a simple query from forecast top-3 high values
         q_text = "Upcoming high capacity dates: " + ", ".join([f"{r['date'].strftime('%Y-%m-%d')} {r['predicted_capacity']:.0f}" for _, r in forecast_df.sort_values("predicted_capacity", ascending=False).head(3).reset_index().iterrows()])
         ret_res = retrieve_tool(rag, q_text, top_k=retrieve_k)
         snippets = ret_res["snippets"]
@@ -308,13 +273,9 @@ if st.button("Run forecast + generate procurement plan"):
             st.subheader("Retrieved snippets (RAG)")
             for i,s in enumerate(snippets):
                 st.markdown(f"**Snippet {i+1}:** {s[:800]}{'...' if len(s)>800 else ''}")
-        else:
-            st.info("No retrieved snippets (RAG empty or no match).")
-        # 3) Generate plan via Gemini (or fallback)
         plan = generate_plan_tool(forecast_df, snippets, organization_notes="")
         st.subheader("Procurement Plan (generated)")
         st.write(plan)
-        # Offer download of forecast
         csv = forecast_df.to_csv(index=False).encode("utf-8")
         st.download_button("Download forecast CSV", data=csv, file_name="forecast.csv", mime="text/csv")
 
