@@ -1,7 +1,6 @@
 # app.py
 import os
 import json
-import io
 from typing import List, Dict, Any
 import streamlit as st
 import pandas as pd
@@ -43,8 +42,8 @@ def ensure_datetime(df: pd.DataFrame, date_col: str) -> pd.DataFrame:
     return df
 
 def create_lag_features(series: pd.Series, lags: int = 7) -> pd.DataFrame:
-    df = pd.DataFrame({ "y": series.values })
-    for lag in range(1, lags+1):
+    df = pd.DataFrame({"y": series.values})
+    for lag in range(1, lags + 1):
         df[f"lag_{lag}"] = df["y"].shift(lag)
     df = df.dropna().reset_index(drop=True)
     return df
@@ -56,7 +55,6 @@ def train_forecaster(y: pd.Series, lags: int = 7) -> Dict[str, Any]:
     X_train, X_val, y_train, y_val = train_test_split(X, y_tr, test_size=0.2, random_state=42, shuffle=False)
     scaler = StandardScaler()
     X_train_s = scaler.fit_transform(X_train)
-    X_val_s = scaler.transform(X_val)
     model = RandomForestRegressor(n_estimators=100, random_state=42)
     model.fit(X_train_s, y_train)
     last_window = y[-lags:].tolist()
@@ -110,7 +108,7 @@ def forecast_tool(df: pd.DataFrame, date_col: str, value_col: str, periods: int)
         delta = pd.to_datetime(df[date_col].iloc[-1]) - pd.to_datetime(df[date_col].iloc[-2])
     except Exception:
         delta = timedelta(days=1)
-    future_dates = [last_date + (i+1) * delta for i in range(periods)]
+    future_dates = [last_date + (i + 1) * delta for i in range(periods)]
     forecast_df = pd.DataFrame({"date": future_dates, "predicted_capacity": preds})
     return {"forecast_df": forecast_df, "model_info": {"lags": forecaster["lags"]}}
 
@@ -122,22 +120,19 @@ def generate_with_gemini(prompt: str) -> str:
     key = os.environ.get("GEMINI_API_KEY") or st.secrets.get("GEMINI_API_KEY", None)
     if not key:
         return local_plan_generator(prompt)
-    headers = {
-        "Content-Type": "application/json",
-        "Authorization": f"Bearer {key}"
-    }
-    body = {"prompt": {"text": prompt}, "temperature":0.2, "maxOutputTokens":800}
+    headers = {"Content-Type": "application/json", "Authorization": f"Bearer {key}"}
+    body = {"prompt": {"text": prompt}, "temperature": 0.2, "maxOutputTokens": 800}
     try:
         r = requests.post(API_URL, headers=headers, json=body, timeout=20)
         r.raise_for_status()
         resp = r.json()
         if isinstance(resp, dict):
-            if "candidates" in resp and isinstance(resp["candidates"], list) and len(resp["candidates"])>0:
+            if "candidates" in resp and resp["candidates"]:
                 text = resp["candidates"][0].get("content", "") or resp["candidates"][0].get("display", "")
                 if text:
                     return text
             if "output" in resp and isinstance(resp["output"], list):
-                return " ".join([str(x.get("content","")) if isinstance(x, dict) else str(x) for x in resp["output"]])
+                return " ".join([str(x.get("content", "")) if isinstance(x, dict) else str(x) for x in resp["output"]])
             if "text" in resp:
                 return resp["text"]
             if "content" in resp:
@@ -179,15 +174,13 @@ def generate_plan_tool(forecast_df: pd.DataFrame, snippets: List[str], organizat
         prompt_parts.append(organization_notes[:1000])
     prompt_parts.append("\nProduce:\n1) Priority procurement items (short bullets). 2) Estimated quantities and timing. 3) Risks & mitigations. Keep answer ~300-500 words.")
     prompt = "\n\n".join(prompt_parts)
-    result = generate_with_gemini(prompt)
-    return result
+    return generate_with_gemini(prompt)
 
 # ---------------- Streamlit UI ----------------
 
 with st.sidebar:
     st.header("Upload & Settings")
     uploaded = st.file_uploader("Upload timeseries CSV (date column + capacity column). Example columns: date, capacity", type=["csv"])
-    sample_btn = st.button("Use sample data")
     date_col = st.text_input("Date column name", value="date")
     value_col = st.text_input("Value column name", value="capacity")
     periods = st.number_input("Forecast periods (steps)", min_value=1, max_value=365, value=14)
@@ -199,22 +192,18 @@ with st.sidebar:
     st.markdown("**Gemini API key** (optional): set `GEMINI_API_KEY` env var or in Streamlit secrets.")
     st.caption("If not set, the app will use a safe local fallback generator.")
 
-# sample data
-if sample_btn and not uploaded:
-    idx = pd.date_range(end=pd.Timestamp.today(), periods=180, freq="D")
-    vals = 1000 + (np.sin(np.arange(len(idx))/10) * 150) + np.linspace(0, 200, len(idx)) + np.random.normal(0, 30, len(idx))
-    df = pd.DataFrame({"date": idx, "capacity": vals})
-    st.success("Sample data loaded.")
-elif uploaded:
-    try:
-        df = read_csv(uploaded)
-    except Exception as e:
-        st.error(f"Failed to read CSV: {e}")
-        st.stop()
-else:
-    st.info("Upload a CSV or click 'Use sample data' to start.")
+if not uploaded:
+    st.info("Please upload a CSV to start.")
     st.stop()
 
+# Read CSV
+try:
+    df = read_csv(uploaded)
+except Exception as e:
+    st.error(f"Failed to read CSV: {e}")
+    st.stop()
+
+# Ensure datetime
 try:
     df = ensure_datetime(df, date_col)
 except Exception as e:
@@ -251,7 +240,7 @@ if paste_context:
         if line.strip():
             texts.append(line.strip())
 
-# --- FIX: add default snippet if none provided ---
+# add default snippet if none provided
 if not texts:
     texts.append("Default knowledge snippet: Always check previous capacity trends and vendor lead times.")
 
@@ -271,8 +260,8 @@ if st.button("Run forecast + generate procurement plan"):
         snippets = ret_res["snippets"]
         if snippets:
             st.subheader("Retrieved snippets (RAG)")
-            for i,s in enumerate(snippets):
-                st.markdown(f"**Snippet {i+1}:** {s[:800]}{'...' if len(s)>800 else ''}")
+            for i, s in enumerate(snippets):
+                st.markdown(f"**Snippet {i+1}:** {s[:800]}{'...' if len(s) > 800 else ''}")
         plan = generate_plan_tool(forecast_df, snippets, organization_notes="")
         st.subheader("Procurement Plan (generated)")
         st.write(plan)
@@ -280,4 +269,4 @@ if st.button("Run forecast + generate procurement plan"):
         st.download_button("Download forecast CSV", data=csv, file_name="forecast.csv", mime="text/csv")
 
 st.markdown("---")
-st.caption("This app is RAG ,the forecasting model ,formal agent framework.")
+st.caption("This app is RAG, the forecasting model, formal agent framework.")
